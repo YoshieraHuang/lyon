@@ -496,64 +496,51 @@ impl EventQueueBuilder {
 
         self.tolerance = tolerance;
         let endpoint_id = EndpointId(std::u32::MAX);
-        match sweep_orientation {
-            Orientation::Vertical => {
-                for evt in path {
-                    match evt {
-                        PathEvent::Begin { at } => {
-                            self.begin(at, endpoint_id);
-                        }
-                        PathEvent::Line { to, .. } => {
-                            self.line_segment(to, endpoint_id, 0.0, 1.0);
-                        }
-                        PathEvent::Quadratic { ctrl, to, .. } => {
-                            self.quadratic_bezier_segment(ctrl, to, endpoint_id);
-                        }
-                        PathEvent::Cubic {
-                            ctrl1, ctrl2, to, ..
-                        } => {
-                            self.cubic_bezier_segment(ctrl1, ctrl2, to, endpoint_id);
-                        }
-                        PathEvent::End { first, .. } => {
-                            self.end(first, endpoint_id);
-                        }
-                    }
+        path.into_iter().for_each(|evt| match sweep_orientation {
+            Orientation::Vertical => match evt {
+                PathEvent::Begin { at } => {
+                    self.begin(at, endpoint_id);
                 }
-            }
-
-            Orientation::Horizontal => {
-                for evt in path {
-                    match evt {
-                        PathEvent::Begin { at } => {
-                            self.begin(reorient(at), endpoint_id);
-                        }
-                        PathEvent::Line { to, .. } => {
-                            self.line_segment(reorient(to), endpoint_id, 0.0, 1.0);
-                        }
-                        PathEvent::Quadratic { ctrl, to, .. } => {
-                            self.quadratic_bezier_segment(
-                                reorient(ctrl),
-                                reorient(to),
-                                endpoint_id,
-                            );
-                        }
-                        PathEvent::Cubic {
-                            ctrl1, ctrl2, to, ..
-                        } => {
-                            self.cubic_bezier_segment(
-                                reorient(ctrl1),
-                                reorient(ctrl2),
-                                reorient(to),
-                                endpoint_id,
-                            );
-                        }
-                        PathEvent::End { first, .. } => {
-                            self.end(reorient(first), endpoint_id);
-                        }
-                    }
+                PathEvent::Line { to, .. } => {
+                    self.line_segment(to, endpoint_id, 0.0, 1.0);
                 }
-            }
-        }
+                PathEvent::Quadratic { ctrl, to, .. } => {
+                    self.quadratic_bezier_segment(ctrl, to, endpoint_id);
+                }
+                PathEvent::Cubic {
+                    ctrl1, ctrl2, to, ..
+                } => {
+                    self.cubic_bezier_segment(ctrl1, ctrl2, to, endpoint_id);
+                }
+                PathEvent::End { first, .. } => {
+                    self.end(first, endpoint_id);
+                }
+            },
+            Orientation::Horizontal => match evt {
+                PathEvent::Begin { at } => {
+                    self.begin(reorient(at), endpoint_id);
+                }
+                PathEvent::Line { to, .. } => {
+                    self.line_segment(reorient(to), endpoint_id, 0.0, 1.0);
+                }
+                PathEvent::Quadratic { ctrl, to, .. } => {
+                    self.quadratic_bezier_segment(reorient(ctrl), reorient(to), endpoint_id);
+                }
+                PathEvent::Cubic {
+                    ctrl1, ctrl2, to, ..
+                } => {
+                    self.cubic_bezier_segment(
+                        reorient(ctrl1),
+                        reorient(ctrl2),
+                        reorient(to),
+                        endpoint_id,
+                    );
+                }
+                PathEvent::End { first, .. } => {
+                    self.end(reorient(first), endpoint_id);
+                }
+            },
+        });
     }
 
     pub fn set_path_with_ids(
@@ -566,73 +553,67 @@ impl EventQueueBuilder {
         self.reset();
 
         self.tolerance = tolerance;
-        match sweep_orientation {
-            Orientation::Vertical => {
-                for evt in path_events {
-                    match evt {
-                        IdEvent::Begin { at } => {
-                            self.begin(points.get_endpoint(at), at);
-                        }
-                        IdEvent::Line { to, .. } => {
-                            self.line_segment(points.get_endpoint(to), to, 0.0, 1.0);
-                        }
-                        IdEvent::Quadratic { ctrl, to, .. } => {
-                            self.quadratic_bezier_segment(
-                                points.get_control_point(ctrl),
-                                points.get_endpoint(to),
-                                to,
-                            );
-                        }
-                        IdEvent::Cubic {
-                            ctrl1, ctrl2, to, ..
-                        } => {
-                            self.cubic_bezier_segment(
-                                points.get_control_point(ctrl1),
-                                points.get_control_point(ctrl2),
-                                points.get_endpoint(to),
-                                to,
-                            );
-                        }
-                        IdEvent::End { first, .. } => {
-                            self.end(points.get_endpoint(first), first);
-                        }
+        path_events
+            .into_iter()
+            .for_each(|evt| match sweep_orientation {
+                Orientation::Vertical => match evt {
+                    IdEvent::Begin { at } => {
+                        self.begin(points.get_endpoint(at), at);
                     }
-                }
-            }
+                    IdEvent::Line { to, .. } => {
+                        self.line_segment(points.get_endpoint(to), to, 0.0, 1.0);
+                    }
+                    IdEvent::Quadratic { ctrl, to, .. } => {
+                        self.quadratic_bezier_segment(
+                            points.get_control_point(ctrl),
+                            points.get_endpoint(to),
+                            to,
+                        );
+                    }
+                    IdEvent::Cubic {
+                        ctrl1, ctrl2, to, ..
+                    } => {
+                        self.cubic_bezier_segment(
+                            points.get_control_point(ctrl1),
+                            points.get_control_point(ctrl2),
+                            points.get_endpoint(to),
+                            to,
+                        );
+                    }
+                    IdEvent::End { first, .. } => {
+                        self.end(points.get_endpoint(first), first);
+                    }
+                },
 
-            Orientation::Horizontal => {
-                for evt in path_events {
-                    match evt {
-                        IdEvent::Begin { at } => {
-                            self.begin(reorient(points.get_endpoint(at)), at);
-                        }
-                        IdEvent::Line { to, .. } => {
-                            self.line_segment(reorient(points.get_endpoint(to)), to, 0.0, 1.0);
-                        }
-                        IdEvent::Quadratic { ctrl, to, .. } => {
-                            self.quadratic_bezier_segment(
-                                reorient(points.get_control_point(ctrl)),
-                                reorient(points.get_endpoint(to)),
-                                to,
-                            );
-                        }
-                        IdEvent::Cubic {
-                            ctrl1, ctrl2, to, ..
-                        } => {
-                            self.cubic_bezier_segment(
-                                reorient(points.get_control_point(ctrl1)),
-                                reorient(points.get_control_point(ctrl2)),
-                                reorient(points.get_endpoint(to)),
-                                to,
-                            );
-                        }
-                        IdEvent::End { first, .. } => {
-                            self.end(reorient(points.get_endpoint(first)), first);
-                        }
+                Orientation::Horizontal => match evt {
+                    IdEvent::Begin { at } => {
+                        self.begin(reorient(points.get_endpoint(at)), at);
                     }
-                }
-            }
-        }
+                    IdEvent::Line { to, .. } => {
+                        self.line_segment(reorient(points.get_endpoint(to)), to, 0.0, 1.0);
+                    }
+                    IdEvent::Quadratic { ctrl, to, .. } => {
+                        self.quadratic_bezier_segment(
+                            reorient(points.get_control_point(ctrl)),
+                            reorient(points.get_endpoint(to)),
+                            to,
+                        );
+                    }
+                    IdEvent::Cubic {
+                        ctrl1, ctrl2, to, ..
+                    } => {
+                        self.cubic_bezier_segment(
+                            reorient(points.get_control_point(ctrl1)),
+                            reorient(points.get_control_point(ctrl2)),
+                            reorient(points.get_endpoint(to)),
+                            to,
+                        );
+                    }
+                    IdEvent::End { first, .. } => {
+                        self.end(reorient(points.get_endpoint(first)), first);
+                    }
+                },
+            });
     }
 
     fn reset(&mut self) {

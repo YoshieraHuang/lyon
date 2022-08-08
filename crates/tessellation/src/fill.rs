@@ -17,6 +17,7 @@ use float_next_after::NextAfter;
 use std::cmp::Ordering;
 use std::f32;
 use std::mem;
+use std::ops::ControlFlow;
 use std::ops::Range;
 
 #[cfg(debug_assertions)]
@@ -792,11 +793,11 @@ impl FillTessellator {
         // There shouldn't be any span left after the tessellation ends.
         // If for whatever reason (bug) there are, flush them so that we don't
         // miss the triangles they contain.
-        for span in &mut self.fill.spans {
+        self.fill.spans.iter_mut().for_each(|span| {
             if let Some(tess) = span.tess.as_mut() {
                 tess.flush(builder);
             }
-        }
+        });
 
         self.fill.spans.clear();
 
@@ -959,7 +960,7 @@ impl FillTessellator {
             self.current_position.y
         );
         tess_log!(self, "<!-- active edges: -->");
-        for e in &self.active.edges {
+        self.active.edges.iter().for_each(|e|
             if e.is_merge {
                 tess_log!(
                     self,
@@ -978,7 +979,7 @@ impl FillTessellator {
                     e.winding,
                 );
             }
-        }
+        );
         tess_log!(self, "<!-- spans: {}-->", self.fill.spans.len());
         tess_log!(self, "</g>");
     }
@@ -986,20 +987,24 @@ impl FillTessellator {
     #[cfg(debug_assertions)]
     fn check_active_edges(&self) {
         let mut winding = WindingState::new();
-        for (idx, edge) in self.active.edges.iter().enumerate() {
-            winding.update(self.fill_rule, edge.winding);
-            if edge.is_merge {
-                assert!(self.fill_rule.is_in(winding.number));
-            } else {
-                assert!(
-                    !is_after(self.current_position, edge.to),
-                    "error at edge {}, position {:.6?} (current: {:.6?}",
-                    idx,
-                    edge.to,
-                    self.current_position,
-                );
-            }
-        }
+        self.active
+            .edges
+            .iter()
+            .enumerate()
+            .for_each(|(idx, edge)| {
+                winding.update(self.fill_rule, edge.winding);
+                if edge.is_merge {
+                    assert!(self.fill_rule.is_in(winding.number));
+                } else {
+                    assert!(
+                        !is_after(self.current_position, edge.to),
+                        "error at edge {}, position {:.6?} (current: {:.6?}",
+                        idx,
+                        edge.to,
+                        self.current_position,
+                    );
+                }
+            });
         assert_eq!(winding.number, 0);
         let expected_span_count = (winding.span_index + 1) as usize;
         assert_eq!(self.fill.spans.len(), expected_span_count);
@@ -1025,77 +1030,86 @@ impl FillTessellator {
 
         let current_x = self.current_position.x;
         let mut connecting_edges = false;
-        let mut active_edge_idx = 0;
+        // let mut active_edge_idx = 0;
         let mut winding = WindingState::new();
         let mut previous_was_merge = false;
 
         // Step 1 - Iterate over edges *before* the current point.
-        for active_edge in &self.active.edges {
-            if active_edge.is_merge {
-                // \.....\ /...../
-                //  \.....x...../   <--- merge vertex
-                //   \....:..../
-                // ---\---:---/----  <-- sweep line
-                //     \..:../
+        let active_edge_idx_res =
+            self.active
+                .edges
+                .iter()
+                .enumerate()
+                .try_for_each(|(i, active_edge)| {
+                    if active_edge.is_merge {
+                        // \.....\ /...../
+                        //  \.....x...../   <--- merge vertex
+                        //   \....:..../
+                        // ---\---:---/----  <-- sweep line
+                        //     \..:../
 
-                // An unresolved merge vertex implies the left and right spans are
-                // adjacent and there is no transition between the two which means
-                // we need to bump the span index manually.
-                winding.span_index += 1;
-                active_edge_idx += 1;
-                previous_was_merge = true;
+                        // An unresolved merge vertex implies the left and right spans are
+                        // adjacent and there is no transition between the two which means
+                        // we need to bump the span index manually.
+                        winding.span_index += 1;
+                        previous_was_merge = true;
+                        return ControlFlow::Continue(());
+                    }
 
-                continue;
-            }
+                    let egde_is_before_current_point =
+                        if points_are_equal(self.current_position, active_edge.to) {
+                            // We just found our first edge that connects with the current point.
+                            // We might find other ones in the next iterations.
+                            connecting_edges = true;
+                            false
+                        } else if active_edge.max_x() < current_x {
+                            true
+                        } else if active_edge.min_x() > current_x {
+                            tess_log!(
+                                self,
+                                "min_x({:?}) > current_x({:?})",
+                                active_edge.min_x(),
+                                current_x
+                            );
+                            false
+                        } else if active_edge.from.y == active_edge.to.y {
+                            connecting_edges = true;
+                            false
+                        } else {
+                            let ex = active_edge.solve_x_for_y(self.current_position.y);
 
-            let egde_is_before_current_point =
-                if points_are_equal(self.current_position, active_edge.to) {
-                    // We just found our first edge that connects with the current point.
-                    // We might find other ones in the next iterations.
-                    connecting_edges = true;
-                    false
-                } else if active_edge.max_x() < current_x {
-                    true
-                } else if active_edge.min_x() > current_x {
+                            if (ex - current_x).abs() <= self.tolerance {
+                                connecting_edges = true;
+                                false
+                            } else if ex > current_x {
+                                tess_log!(self, "ex({:?}) > current_x({:?})", ex, current_x);
+                                false
+                            } else {
+                                true
+                            }
+                        };
+
+                    if !egde_is_before_current_point {
+                        return ControlFlow::Break(i);
+                    }
+
+                    winding.update(self.fill_rule, active_edge.winding);
+                    previous_was_merge = false;
+
                     tess_log!(
                         self,
-                        "min_x({:?}) > current_x({:?})",
-                        active_edge.min_x(),
-                        current_x
+                        " > span: {}, in: {}",
+                        winding.span_index,
+                        winding.is_in
                     );
-                    false
-                } else if active_edge.from.y == active_edge.to.y {
-                    connecting_edges = true;
-                    false
-                } else {
-                    let ex = active_edge.solve_x_for_y(self.current_position.y);
 
-                    if (ex - current_x).abs() <= self.tolerance {
-                        connecting_edges = true;
-                        false
-                    } else if ex > current_x {
-                        tess_log!(self, "ex({:?}) > current_x({:?})", ex, current_x);
-                        false
-                    } else {
-                        true
-                    }
-                };
+                    ControlFlow::Continue(())
+                });
 
-            if !egde_is_before_current_point {
-                break;
-            }
-
-            winding.update(self.fill_rule, active_edge.winding);
-            previous_was_merge = false;
-            active_edge_idx += 1;
-
-            tess_log!(
-                self,
-                " > span: {}, in: {}",
-                winding.span_index,
-                winding.is_in
-            );
-        }
+        let mut active_edge_idx = match active_edge_idx_res {
+            ControlFlow::Break(i) => i,
+            ControlFlow::Continue(()) => self.active.edges.len(),
+        };
 
         scan.above.start = active_edge_idx;
         scan.winding_before_point = winding;
@@ -1154,79 +1168,90 @@ impl FillTessellator {
             let in_before_vertex = winding.is_in;
             let mut first_connecting_edge = !previous_was_merge;
 
-            for active_edge in &self.active.edges[active_edge_idx..] {
-                if active_edge.is_merge {
-                    if !winding.is_in {
-                        return Err(InternalError::MergeVertexOutside);
+            let res = self.active.edges[active_edge_idx..]
+                .iter()
+                .enumerate()
+                .try_for_each(|(additional, active_edge)| {
+                    let edge_idx = active_edge_idx + additional;
+                    if active_edge.is_merge {
+                        if !winding.is_in {
+                            return ControlFlow::Break(Err(InternalError::MergeVertexOutside));
+                        }
+
+                        // Merge above the current vertex to resolve.
+                        //
+                        // Resolving a merge usually leads to a span adjacent to the merge
+                        // ending.
+                        //
+                        // If there was already an edge connecting with the current vertex
+                        // just left of the merge edge, we can end the span between that edge
+                        // and the merge.
+                        //
+                        //    |
+                        //    v
+                        //  \...:...
+                        //  .\..:...
+                        //  ..\.:...
+                        //  ...\:...
+                        //  ....X...
+                        scan.spans_to_end.push(winding.span_index);
+
+                        // To deal with the right side of the merge, we simply pretend it
+                        // transitioned into the shape. Next edge that transitions out (if any)
+                        // will close out the span as if it was surrounded be regular edges.
+                        //
+                        //       |
+                        //       v
+                        //  ...:.../
+                        //  ...:../
+                        //  ...:./
+                        //  ...:/
+                        //  ...X
+
+                        winding.span_index += 1;
+                        first_connecting_edge = false;
+
+                        return ControlFlow::Continue(());
                     }
 
-                    // Merge above the current vertex to resolve.
-                    //
-                    // Resolving a merge usually leads to a span adjacent to the merge
-                    // ending.
-                    //
-                    // If there was already an edge connecting with the current vertex
-                    // just left of the merge edge, we can end the span between that edge
-                    // and the merge.
-                    //
-                    //    |
-                    //    v
-                    //  \...:...
-                    //  .\..:...
-                    //  ..\.:...
-                    //  ...\:...
-                    //  ....X...
-                    scan.spans_to_end.push(winding.span_index);
+                    match self.is_edge_connecting(active_edge, edge_idx, scan) {
+                        Err(e) => return ControlFlow::Break(Err(e)),
+                        Ok(false) => return ControlFlow::Break(Ok(edge_idx)),
+                        _ => {}
+                    }
 
-                    // To deal with the right side of the merge, we simply pretend it
-                    // transitioned into the shape. Next edge that transitions out (if any)
-                    // will close out the span as if it was surrounded be regular edges.
-                    //
-                    //       |
-                    //       v
-                    //  ...:.../
-                    //  ...:../
-                    //  ...:./
-                    //  ...:/
-                    //  ...X
+                    if !first_connecting_edge && winding.is_in {
+                        // End event.
+                        //
+                        //  \.../
+                        //   \./
+                        //    x
+                        //
+                        scan.spans_to_end.push(winding.span_index);
+                    }
 
-                    winding.span_index += 1;
-                    active_edge_idx += 1;
+                    winding.update(self.fill_rule, active_edge.winding);
+
+                    tess_log!(
+                        self,
+                        " x span: {} in: {}",
+                        winding.span_index,
+                        winding.is_in
+                    );
+
+                    if winding.is_in && winding.span_index >= self.fill.spans.len() as i32 {
+                        return ControlFlow::Break(Err(InternalError::InsufficientNumberOfSpans));
+                    }
+
                     first_connecting_edge = false;
 
-                    continue;
-                }
+                    ControlFlow::Continue(())
+                });
 
-                if !self.is_edge_connecting(active_edge, active_edge_idx, scan)? {
-                    break;
-                }
-
-                if !first_connecting_edge && winding.is_in {
-                    // End event.
-                    //
-                    //  \.../
-                    //   \./
-                    //    x
-                    //
-                    scan.spans_to_end.push(winding.span_index);
-                }
-
-                winding.update(self.fill_rule, active_edge.winding);
-
-                tess_log!(
-                    self,
-                    " x span: {} in: {}",
-                    winding.span_index,
-                    winding.is_in
-                );
-
-                if winding.is_in && winding.span_index >= self.fill.spans.len() as i32 {
-                    return Err(InternalError::InsufficientNumberOfSpans);
-                }
-
-                active_edge_idx += 1;
-                first_connecting_edge = false;
-            }
+            active_edge_idx = match res {
+                ControlFlow::Break(res) => res?,
+                ControlFlow::Continue(()) => self.active.edges.len(),
+            };
 
             let in_after_vertex = winding.is_in;
 
@@ -1278,27 +1303,23 @@ impl FillTessellator {
         // This function typically takes about 2.5% ~ 3% of the profile, so not necessarily the best
         // target for optimization. That said all of the work done here is only robustness checks
         // so we could add an option to skip it.
-        for active_edge in &self.active.edges[active_edge_idx..] {
-            if active_edge.is_merge {
-                continue;
-            }
-
-            if active_edge.max_x() < current_x {
-                return Err(InternalError::IncorrectActiveEdgeOrder(1));
-            }
-
-            if points_are_equal(self.current_position, active_edge.to) {
-                return Err(InternalError::IncorrectActiveEdgeOrder(2));
-            }
-
-            if active_edge.min_x() < current_x
-                && active_edge.solve_x_for_y(self.current_position.y) < current_x
-            {
-                return Err(InternalError::IncorrectActiveEdgeOrder(3));
-            }
-        }
-
-        Ok(())
+        self.active.edges[active_edge_idx..]
+            .iter()
+            .try_for_each(|active_edge| {
+                if active_edge.is_merge {
+                    Ok(())
+                } else if active_edge.max_x() < current_x {
+                    Err(InternalError::IncorrectActiveEdgeOrder(1))
+                } else if points_are_equal(self.current_position, active_edge.to) {
+                    Err(InternalError::IncorrectActiveEdgeOrder(2))
+                } else if active_edge.min_x() < current_x
+                    && active_edge.solve_x_for_y(self.current_position.y) < current_x
+                {
+                    Err(InternalError::IncorrectActiveEdgeOrder(3))
+                } else {
+                    Ok(())
+                }
+            })
     }
 
     // Returns Ok(true) if the edge connects with the current vertex, Ok(false) otherwise.
@@ -1361,22 +1382,24 @@ impl FillTessellator {
         scan: &mut ActiveEdgeScan,
         output: &mut dyn FillGeometryBuilder,
     ) {
-        for &(span_index, side) in &scan.vertex_events {
-            tess_log!(
-                self,
-                "   -> Vertex event, span: {:?} / {:?} / id: {:?}",
-                span_index,
-                side,
-                self.current_vertex
-            );
-            self.fill.spans[span_index as usize].tess().vertex(
-                self.current_position,
-                self.current_vertex,
-                side,
-            );
-        }
+        scan.vertex_events
+            .drain(0..)
+            .for_each(|(span_index, side)| {
+                tess_log!(
+                    self,
+                    "   -> Vertex event, span: {:?} / {:?} / id: {:?}",
+                    span_index,
+                    side,
+                    self.current_vertex
+                );
+                self.fill.spans[span_index as usize].tess().vertex(
+                    self.current_position,
+                    self.current_vertex,
+                    side,
+                );
+            });
 
-        for &span_index in &scan.spans_to_end {
+        scan.spans_to_end.drain(0..).for_each(|span_index| {
             tess_log!(self, "   -> End span {:?}", span_index);
             self.fill.end_span(
                 span_index,
@@ -1384,12 +1407,12 @@ impl FillTessellator {
                 self.current_vertex,
                 output,
             );
-        }
+        });
 
         self.fill.cleanup_spans();
 
-        for &edge_idx in &scan.edges_to_split {
-            let active_edge = &mut self.active.edges[edge_idx];
+        scan.edges_to_split.drain(0..).for_each(|edge_idx| {
+            let active_edge = self.active.edges.get_mut(edge_idx).unwrap();
             let to = active_edge.to;
 
             self.edges_below.push(PendingEdge {
@@ -1409,7 +1432,7 @@ impl FillTessellator {
             );
 
             active_edge.to = self.current_position;
-        }
+        });
 
         if scan.merge_event {
             // Merge event.
@@ -1518,15 +1541,19 @@ impl FillTessellator {
         }
 
         #[cfg(debug_assertions)]
-        for active_edge in &self.active.edges[above.clone()] {
-            debug_assert!(active_edge.is_merge || !is_after(self.current_position, active_edge.to));
-        }
+        self.active.edges[above.clone()]
+            .iter()
+            .for_each(|active_edge| {
+                debug_assert!(
+                    active_edge.is_merge || !is_after(self.current_position, active_edge.to)
+                );
+            });
 
         let from = self.current_position;
         let from_id = self.current_vertex;
         self.active.edges.splice(
             above,
-            self.edges_below.iter().map(|edge| ActiveEdge {
+            self.edges_below.drain(0..).map(|edge| ActiveEdge {
                 from,
                 to: edge.to,
                 winding: edge.winding,
@@ -1536,8 +1563,6 @@ impl FillTessellator {
                 range_end: edge.range_end,
             }),
         );
-
-        self.edges_below.clear();
     }
 
     fn split_event(&mut self, left_enclosing_edge_idx: ActiveEdgeIdx, left_span_idx: SpanIdx) {
@@ -1607,7 +1632,7 @@ impl FillTessellator {
         // invariants in doing so.
 
         let mut edges_below = mem::take(&mut self.edges_below);
-        for edge_below in &mut edges_below {
+        edges_below.iter_mut().for_each(|edge_below| {
             let below_min_x = self.current_position.x.min(edge_below.to.x);
             let below_max_x = fmax(self.current_position.x, edge_below.to.x);
 
@@ -1618,48 +1643,52 @@ impl FillTessellator {
 
             let mut tb_min = 1.0;
             let mut intersection = None;
-            for (i, active_edge) in self.active.edges.iter().enumerate() {
-                if skip_range.contains(&i) {
-                    continue;
-                }
-                if active_edge.is_merge || below_min_x > active_edge.max_x() {
-                    continue;
-                }
-
-                if below_max_x < active_edge.min_x() {
-                    // We can't early out because there might be edges further on the right
-                    // that extend further on the left which would be missed.
-                    //
-                    // sweep line -> =o===/==/==
-                    //                |\ /  /
-                    //                | o  /
-                    //  edge below -> |   /
-                    //                |  /
-                    //                | / <- missed active edge
-                    //                |/
-                    //                x <- missed intersection
-                    //               /|
-                    continue;
-                }
-
-                let active_segment = LineSegment {
-                    from: active_edge.from.to_f64(),
-                    to: active_edge.to.to_f64(),
-                };
-
-                if let Some((ta, tb)) = active_segment.intersection_t(&below_segment) {
-                    if tb < tb_min && tb > 0.0 && ta > 0.0 && ta <= 1.0 {
-                        // we only want the closest intersection;
-                        tb_min = tb;
-                        intersection = Some((ta, tb, i));
+            self.active
+                .edges
+                .iter()
+                .enumerate()
+                .for_each(|(i, active_edge)| {
+                    if skip_range.contains(&i) {
+                        return;
                     }
-                }
-            }
+                    if active_edge.is_merge || below_min_x > active_edge.max_x() {
+                        return;
+                    }
+
+                    if below_max_x < active_edge.min_x() {
+                        // We can't early out because there might be edges further on the right
+                        // that extend further on the left which would be missed.
+                        //
+                        // sweep line -> =o===/==/==
+                        //                |\ /  /
+                        //                | o  /
+                        //  edge below -> |   /
+                        //                |  /
+                        //                | / <- missed active edge
+                        //                |/
+                        //                x <- missed intersection
+                        //               /|
+                        return;
+                    }
+
+                    let active_segment = LineSegment {
+                        from: active_edge.from.to_f64(),
+                        to: active_edge.to.to_f64(),
+                    };
+
+                    if let Some((ta, tb)) = active_segment.intersection_t(&below_segment) {
+                        if tb < tb_min && tb > 0.0 && ta > 0.0 && ta <= 1.0 {
+                            // we only want the closest intersection;
+                            tb_min = tb;
+                            intersection = Some((ta, tb, i));
+                        }
+                    }
+                });
 
             if let Some((ta, tb, active_edge_idx)) = intersection {
                 self.process_intersection(ta, tb, active_edge_idx, edge_below, &below_segment);
             }
-        }
+        });
         self.edges_below = edges_below;
 
         //self.log_active_edges();
@@ -1840,7 +1869,7 @@ impl FillTessellator {
 
         let mut has_merge_vertex = false;
         let mut prev_x = f32::NAN;
-        for (i, edge) in self.active.edges.iter().enumerate() {
+        self.active.edges.iter().enumerate().for_each(|(i, edge)| {
             if edge.is_merge {
                 debug_assert!(!prev_x.is_nan());
                 has_merge_vertex = true;
@@ -1869,7 +1898,7 @@ impl FillTessellator {
                 keys.push((fmax(x, edge.min_x()), i));
                 prev_x = x;
             }
-        }
+        });
 
         keys.sort_by(|a, b| match a.0.partial_cmp(&b.0).unwrap() {
             Ordering::Less => Ordering::Less,
@@ -1890,19 +1919,17 @@ impl FillTessellator {
             }
         });
 
-        let mut new_active_edges = Vec::with_capacity(self.active.edges.len());
-        for &(_, idx) in &keys {
-            new_active_edges.push(self.active.edges[idx]);
-        }
-
-        self.active.edges = new_active_edges;
+        self.active.edges = keys
+            .iter()
+            .map(|(_, idx)| self.active.edges[*idx])
+            .collect::<Vec<_>>();
 
         if !has_merge_vertex {
             return;
         }
 
         let mut winding_number = 0;
-        for i in 0..self.active.edges.len() {
+        (0..self.active.edges.len()).for_each(|i| {
             let needs_swap = {
                 let edge = &self.active.edges[i];
                 if edge.is_merge {
@@ -1929,7 +1956,7 @@ impl FillTessellator {
                     idx -= 1;
                 }
             }
-        }
+        });
     }
 
     #[inline(never)]
@@ -1996,7 +2023,7 @@ impl FillTessellator {
             return;
         }
 
-        for idx in (0..(self.edges_below.len() - 1)).rev() {
+        (0..(self.edges_below.len() - 1)).rev().for_each(|idx| {
             let a_idx = idx;
             let b_idx = idx + 1;
 
@@ -2017,7 +2044,7 @@ impl FillTessellator {
             if angle_is_close {
                 self.merge_coincident_edges(a_idx, b_idx);
             }
-        }
+        });
     }
 
     #[cold]
